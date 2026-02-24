@@ -327,13 +327,38 @@ class TensorFlowModelService:
                 })
 
             primary = results[0]
-            is_detected = primary["confidence"] > confidence_threshold
+            is_detected = primary["confidence"] >= confidence_threshold
             uncertainty = float(pred_probs[top_3_idx[0]] - pred_probs[top_3_idx[1]])
             validation = ResultValidator.validate_prediction_consistency(results, pred_probs, self._class_names)
 
+            # ถ้าความมั่นใจต่ำกว่า threshold ถือว่าเป็นพืชสุขภาพดี (Healthy)
+            if not is_detected:
+                healthy_confidence = 1.0 - primary["confidence"]
+                return {
+                    "success": True,
+                    "is_detected": False,
+                    "is_healthy": True,
+                    "is_uncertain": False,
+                    "primary": {
+                        "class_name": "Healthy",
+                        "name_th": "พืชสุขภาพดี",
+                        "name_en": "Healthy",
+                        "confidence": float(healthy_confidence),
+                        "confidence_percent": round(healthy_confidence * 100, 2),
+                        "category": "healthy",
+                        "adjusted_confidence_percent": round(healthy_confidence * 100, 2)
+                    },
+                    "top_3": results,  # ยังคงส่ง top 3 จริงกลับไปเพื่อ debug
+                    "preprocessing": {"enhanced": enhance, "tta": use_tta},
+                    "validation": validation,
+                    "uncertainty_score": round(uncertainty, 4),
+                    "message": "ความมั่นใจต่ำกว่าเกณฑ์ ระบบจึงระบุว่าเป็นพืชสุขภาพดี"
+                }
+
             return {
                 "success": True,
-                "is_detected": bool(is_detected),
+                "is_detected": True,
+                "is_healthy": False,
                 "is_uncertain": bool(uncertainty < 0.2),
                 "primary": {
                     **primary,
