@@ -1,0 +1,35 @@
+services:
+  backend:
+    build: .
+    container_name: vegetable_backend
+    ports:
+      - "8888:8888"
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - /app/__pycache__
+    restart: unless-stopped
+    networks:
+      - vegetable_network
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: vegetable_ngrok
+    command:
+      - "http"
+      - "--region=ap"
+      - "backend:8888"
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    ports:
+      - "4040:4040"
+    depends_on:
+      - backend
+    restart: always
+    networks:
+      - vegetable_network
+
+networks:
+  vegetable_network:
+    driver: bridge
