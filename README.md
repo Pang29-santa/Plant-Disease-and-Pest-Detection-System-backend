@@ -96,7 +96,41 @@ cd backend_fastapi
 pip install -r requirements.txt
 ```
 
-### 2. ตั้งค่า Environment Variables
+### 2. ตั้งค่า ML Model (⚠️ สำคัญ!)
+
+**โมเดลไม่ได้อยู่ใน GitHub (ขนาดใหญ่ 27MB)** ต้องดาวน์โหลดมาใส่เอง:
+
+#### วิธีที่ 1: ดาวน์โหลดจากลิงก์ (ถ้ามี)
+```bash
+# สร้างโฟลเดอร์ models
+mkdir models
+
+# ดาวน์โหลดโมเดล (แทน YOUR_DOWNLOAD_LINK ด้วยลิงก์จริง)
+curl -L "YOUR_DOWNLOAD_LINK" -o models/model_round3.h5
+
+# ดาวน์โหลด class names
+curl -L "YOUR_DOWNLOAD_LINK" -o models/class_names_round3.json
+```
+
+#### วิธีที่ 2: คัดลอกจากเครื่องที่มีโมเดลอยู่แล้ว
+```bash
+# จากเครื่องที่มีโมเดล
+scp models/model_round3.h5 user@new-server:/path/to/backend_fastapi/models/
+scp models/class_names_round3.json user@new-server:/path/to/backend_fastapi/models/
+```
+
+#### วิธีที่ 3: เทรนโมเดลเอง
+ดูวิธีเทรนโมเดลได้ที่: `D:\pang\project\trainmodel\scripts\train_model.py`
+
+#### โครงสร้างที่ถูกต้อง
+```
+backend_fastapi/
+└── models/
+    ├── model_round3.h5           ← ต้องมี (27MB)
+    └── class_names_round3.json   ← มีใน GitHub อยู่แล้ว
+```
+
+### 3. ตั้งค่า Environment Variables
 สร้างไฟล์ `.env`:
 ```env
 MONGODB_URI=mongodb+srv://username:password@cluster.mongodb.net/
@@ -104,7 +138,7 @@ JWT_SECRET_KEY=your-secret-key
 TELEGRAM_BOT_TOKEN=your-bot-token
 ```
 
-### 3. รัน Server
+### 4. รัน Server
 ```bash
 # Windows
 .\scripts\start_dev.bat
