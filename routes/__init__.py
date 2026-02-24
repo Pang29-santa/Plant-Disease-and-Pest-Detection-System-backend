@@ -18,6 +18,7 @@ from .planting import router as planting_router
 from .detection import router as detection_router
 from .telegram import router as telegram_router
 from .ai_detection import router as ai_detection_router
+from .ai_detection_hybrid import router as ai_hybrid_router
 from .dashboard import router as dashboard_router
 from .admin_database import router as admin_database_router
 from .contact import router as contact_router
@@ -34,6 +35,7 @@ all_routers = [
     health_router,
     auth_router,
     ai_detection_router,
+    ai_hybrid_router,
     vegetables_router,
     nutrition_router,
     diseases_pest_router,

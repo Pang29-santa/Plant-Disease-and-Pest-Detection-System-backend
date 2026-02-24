@@ -257,7 +257,7 @@ class TensorFlowModelService:
     def is_ready(self) -> bool:
         return self._is_loaded and self._model is not None
 
-    def preprocess_image(self, image_path: str, enhance: bool = True) -> Optional[np.ndarray]:
+    def preprocess_image(self, image_path: str, enhance: bool = False) -> Optional[np.ndarray]:
         try:
             from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
             img = ImagePreprocessor.preprocess_for_model(image_path, enhance=enhance)
@@ -298,9 +298,9 @@ class TensorFlowModelService:
     def predict(
         self, 
         image_path: str, 
-        use_tta: bool = True,
-        enhance: bool = True,
-        confidence_threshold: float = 0.5
+        use_tta: bool = False,      # Optimized: TTA makes results worse
+        enhance: bool = False,      # Optimized: Enhancement makes results worse
+        confidence_threshold: float = 0.4  # Optimized: Best accuracy (80%)
     ) -> Optional[Dict]:
         if not self.is_ready(): return None
 

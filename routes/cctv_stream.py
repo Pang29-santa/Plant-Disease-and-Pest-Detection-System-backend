@@ -129,24 +129,30 @@ async def get_camera_stream(cctv_id: str):
     username = details.get("username", "")
     password = details.get("password", "")
     
-    # สร้าง URL สำหรับเชื่อมต่อ
-    if ip_address.startswith(("http://", "https://", "rtsp://")):
-        camera_url = ip_address
-        if username and "@" not in camera_url:
-            # แทรก username/password เข้าไปใน URL
-            parsed = urlparse(camera_url)
-            netloc = f"{username}:{password}@{parsed.hostname}"
-            if parsed.port:
-                netloc += f":{parsed.port}"
-            from urllib.parse import urlunparse
-            camera_url = urlunparse((
-                parsed.scheme, netloc, parsed.path,
-                parsed.params, parsed.query, parsed.fragment
-            ))
+    # สร้าง URL สำหรับเชื่อมต่อ (Logic อ้างอิงจากโค้ดเดิม)
+    def _inject_auth(url: str, username: str, password: str) -> str:
+        if not username: return url
+        parsed = urlparse(url)
+        auth = f"{username}:{password}@" if password else f"{username}@"
+        netloc = f"{auth}{parsed.hostname}"
+        if parsed.port: netloc += f":{parsed.port}"
+        from urllib.parse import urlunparse
+        return urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+
+    src = (ip_address or "").strip()
+    low = src.lower()
+    
+    if low.startswith("rtsp://"):
+        parsed = urlparse(src)
+        camera_url = _inject_auth(src, username, password) if username and not parsed.username else src
+    elif low.startswith(("http://", "https://")):
+        parsed = urlparse(src)
+        camera_url = _inject_auth(src, username, password) if username and not parsed.username else src
     else:
-        # host:port format
+        # กรณีระบุแค่ host[:port]
         auth = f"{username}:{password}@" if username else ""
-        camera_url = f"http://{auth}{ip_address}/video"
+        camera_url = f"http://{auth}{src}/video"
+
     
     async def stream_generator():
         """สร้าง MJPEG stream"""
