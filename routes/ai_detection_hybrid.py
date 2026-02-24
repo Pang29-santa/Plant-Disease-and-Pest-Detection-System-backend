@@ -78,74 +78,143 @@ async def detect_hybrid(
         
         print(f"🔍 [HYBRID] Starting analysis for: {file.filename}")
         
-        # ========== STEP 1: เรียก TensorFlow ก่อน ==========
+        # ========== STEP 1: เรียก TensorFlow ก่อน (เร็ว) ==========
         tf_service = get_tf_model_service()
         tf_result = None
+        tf_confidence = 0
         
         if tf_service.is_ready():
             print(f"   → Step 1: TensorFlow analysis")
             tf_result = await asyncio.to_thread(
                 analyze_with_tensorflow,
                 str(temp_path),
-                use_tta=True,
-                enhance=True,
-                confidence_threshold=tf_threshold
+                use_tta=False,      # Optimized params
+                enhance=False,
+                confidence_threshold=0.0  # ไม่ใช้ threshold ตอนนี้ จะใช้ weighting แทน
             )
         
-        # ถ้า TF สำเร็จและ confidence สูงพอ → ใช้ผล TF
+        # เก็บค่า TF confidence
         if tf_result and tf_result.get("success"):
-            primary = tf_result.get("primary", {})
-            confidence = primary.get("confidence", 0)
-            is_detected = tf_result.get("is_detected", False)
-            
-            print(f"   → TF Result: {primary.get('name_th')} (confidence: {confidence:.2%})")
-            
-            # ถ้า TF มั่นใจพอ และพบโรค/แมลง → ใช้ผล TF
-            if is_detected and confidence >= tf_threshold:
-                print(f"   ✓ Using TensorFlow result (high confidence)")
-                
-                response_data = _build_tf_response(tf_result, "tensorflow")
-                model_used = "tensorflow"
-                
+            tf_confidence = tf_result.get("primary", {}).get("confidence", 0)
+            tf_prediction = tf_result.get("primary", {})
+            print(f"   → TF Result: {tf_prediction.get('name_th')} (confidence: {tf_confidence:.2%})")
+        
+        # ========== STEP 2: เรียก Kimi AI (ละเอียด) ==========
+        # เรียกเสมอเพื่อเอาไปชั่งน้ำหนัก
+        print(f"   → Step 2: Kimi AI analysis")
+        kimi_result = await asyncio.to_thread(
+            analyze_plant_health,
+            str(temp_path)
+        )
+        
+        kimi_confidence = 0.5  # Default ถ้า Kimi ไม่บอก confidence
+        kimi_prediction = None
+        
+        if kimi_result and kimi_result.get("success"):
+            analysis = kimi_result.get("analysis", {})
+            kimi_prediction = analysis
+            # Kimi อาจไม่มี confidence ชัดเจน ให้ใช้ heuristic
+            kimi_conf = analysis.get("confidence", "medium")
+            if isinstance(kimi_conf, str):
+                # แปลงเป็น number
+                conf_map = {"very_high": 0.9, "high": 0.75, "medium": 0.5, "low": 0.3, "very_low": 0.1}
+                kimi_confidence = conf_map.get(kimi_conf.lower(), 0.5)
             else:
-                # TF ไม่มั่นใจ → Fallback ไป Kimi
-                print(f"   → TF confidence low ({confidence:.2%}), falling back to Kimi AI")
-                
-                kimi_result = await asyncio.to_thread(
-                    analyze_plant_health,
-                    str(temp_path)
-                )
-                
-                if kimi_result and kimi_result.get("success"):
-                    print(f"   ✓ Using Kimi AI result")
-                    response_data = _build_kimi_response(kimi_result)
-                    model_used = "kimi"
-                else:
-                    # Kimi ก็ล้ม → ใช้ผล TF ที่มี (แม้จะไม่มั่นใจ)
-                    print(f"   ⚠ Kimi failed, using TF result anyway")
-                    response_data = _build_tf_response(tf_result, "tensorflow")
-                    model_used = "tensorflow"
+                kimi_confidence = float(kimi_conf) if kimi_conf else 0.5
+            
+            print(f"   → Kimi Result: {analysis.get('target_name_th')} (confidence: {kimi_confidence:.2%})")
+        
+        # ========== STEP 3: Confidence-based Weighting ==========
+        print(f"   → Weighting: TF={tf_confidence:.2%}, Kimi={kimi_confidence:.2%}")
+        
+        # คำนวณน้ำหนัก
+        if tf_confidence >= 0.7:
+            # TF มั่นใจมาก → ใช้ TF เป็นหลัก (70-90%)
+            tf_weight = 0.8
+            kimi_weight = 0.2
+            weight_method = "tf_high_confidence"
+            
+        elif tf_confidence >= 0.5:
+            # TF มั่นใจปานกลาง → ชั่งเท่า ๆ กัน
+            tf_weight = 0.6
+            kimi_weight = 0.4
+            weight_method = "balanced"
+            
+        elif tf_confidence >= 0.3:
+            # TF ไม่มั่นใจ → ให้ Kimi มากกว่า
+            tf_weight = 0.4
+            kimi_weight = 0.6
+            weight_method = "kimi_preferred"
+            
         else:
-            # TF ล้มเหลว → ใช้ Kimi เลย
-            print(f"   → TensorFlow failed, using Kimi AI")
+            # TF มั่นใจน้อยมาก → ให้ Kimi เป็นหลัก
+            tf_weight = 0.2
+            kimi_weight = 0.8
+            weight_method = "kimi_high_confidence"
+        
+        # ตัดสินใจใช้ผลลัพธ์
+        if tf_result and tf_result.get("success") and kimi_result and kimi_result.get("success"):
+            # ถ้าทั้งสองตรงกัน → ใช้เลย
+            tf_class = tf_prediction.get("class_name", "")
+            kimi_class = kimi_prediction.get("target_name_en", "")
             
-            kimi_result = await asyncio.to_thread(
-                analyze_plant_health,
-                str(temp_path)
-            )
+            # Normalize class names for comparison
+            tf_class_norm = tf_class.replace(" ", "").lower()
+            kimi_class_norm = kimi_class.replace(" ", "").lower()
             
-            if kimi_result and kimi_result.get("success"):
-                response_data = _build_kimi_response(kimi_result)
-                model_used = "kimi"
+            if tf_class_norm == kimi_class_norm or tf_class in kimi_class or kimi_class in tf_class:
+                print(f"   ✓ Both models agree: {tf_prediction.get('name_th')}")
+                response_data = _build_tf_response(tf_result, "both_agree")
+                model_used = "both_agree"
             else:
-                raise HTTPException(status_code=500, detail="Both TensorFlow and Kimi AI failed")
+                # ไม่ตรงกัน → ใช้ confidence weighting
+                if tf_weight >= kimi_weight:
+                    print(f"   ✓ Weighted: Using TensorFlow (weight={tf_weight:.0%})")
+                    response_data = _build_tf_response(tf_result, "weighted_tf")
+                    response_data["analysis"]["kimi_disagreement"] = kimi_prediction.get("target_name_th")
+                    model_used = f"weighted_tf({tf_weight:.0%})"
+                else:
+                    print(f"   ✓ Weighted: Using Kimi AI (weight={kimi_weight:.0%})")
+                    response_data = _build_kimi_response(kimi_result)
+                    response_data["analysis"]["tf_disagreement"] = tf_prediction.get("name_th")
+                    model_used = f"weighted_kimi({kimi_weight:.0%})"
+                
+                # เพิ่มข้อมูล weighting
+                response_data["weighting_info"] = {
+                    "tf_weight": tf_weight,
+                    "kimi_weight": kimi_weight,
+                    "tf_confidence": tf_confidence,
+                    "kimi_confidence": kimi_confidence,
+                    "method": weight_method
+                }
+                
+        elif tf_result and tf_result.get("success"):
+            # มีแค่ TF
+            print(f"   ✓ Only TensorFlow available")
+            response_data = _build_tf_response(tf_result, "tensorflow_only")
+            model_used = "tensorflow_only"
+            
+        elif kimi_result and kimi_result.get("success"):
+            # มีแค่ Kimi
+            print(f"   ✓ Only Kimi AI available")
+            response_data = _build_kimi_response(kimi_result)
+            model_used = "kimi_only"
+            
+        else:
+            # ทั้งสองล้ม
+            raise HTTPException(status_code=500, detail="Both TensorFlow and Kimi AI failed")
         
         # เพิ่ม metadata
         response_data["hybrid_info"] = {
             "model_used": model_used,
             "tf_threshold": tf_threshold,
             "timestamp": datetime.now().isoformat(),
+            "weighting_method": "confidence_based",
         }
+        
+        # เพิ่มข้อมูล weighting ถ้ามี
+        if "weighting_info" in response_data:
+            response_data["hybrid_info"]["weighting"] = response_data.pop("weighting_info")
         
         # บันทึกผลลง database (ถ้าเลือก)
         if save_result:
