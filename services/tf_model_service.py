@@ -1,6 +1,7 @@
 """
-TensorFlow Model Service - Updated for model_round3.h5
+TensorFlow Model Service - Restored & Updated
 Service สำหรับโหลดและใช้งานโมเดล TensorFlow วิเคราะห์รูปภาพโรคพืชและศัตรูพืช
+รองรับ Image Preprocessing และ Test Time Augmentation (TTA) เพื่อความแม่นยำสูง
 """
 
 import os
@@ -28,22 +29,13 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # ============================================
-# Model Configuration - UPDATED
+# Model Configuration
 # ============================================
-BASE_DIR = Path(__file__).parent.parent  # backend_fastapi root
+BASE_DIR = Path("D:/pang/project/backend_fastapi")
+# ใช้โมเดล round3 ตามที่ระบบปัจจุบันใช้
 MODEL_PATH = BASE_DIR / "models" / "model_round3.h5"
 CLASS_NAMES_PATH = BASE_DIR / "models" / "class_names_round3.json"
 IMG_SIZE = 160  # ขนาดรูปภาพที่โมเดลต้องการ
-
-# Load class names from JSON
-CLASS_NAMES = []
-if CLASS_NAMES_PATH.exists():
-    with open(CLASS_NAMES_PATH, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-        CLASS_NAMES = [data[str(i)] for i in range(len(data))]
-    logger.info(f"Loaded {len(CLASS_NAMES)} classes from JSON")
-else:
-    logger.error(f"Class names file not found: {CLASS_NAMES_PATH}")
 
 # ============================================
 # Class Mapping (16 Classes)
@@ -148,26 +140,14 @@ CLASS_MAPPING = {
     },
 }
 
-
 class ResultValidator:
-    """
-    Validator สำหรับตรวจสอบความสอดคล้องของผลการทำนาย
-    """
+    """Validator สำหรับตรวจสอบความสอดคล้องของผลการทำนาย"""
     
-    DISEASE_LOOKING_LIKE_PEST = {
-        "Leaf Spot Disease",
-        "Leaf Blight",
-        "Cercospora Leaf Spot",
-    }
-    
-    PEST_LOOKING_LIKE_DISEASE = {
-        "Leaf Miner",
-        "Flea Beetle",
-    }
+    DISEASE_LOOKING_LIKE_PEST = {"Leaf Spot Disease", "Leaf Blight", "Cercospora Leaf Spot"}
+    PEST_LOOKING_LIKE_DISEASE = {"Leaf Miner", "Flea Beetle"}
     
     @classmethod
     def validate_prediction_consistency(cls, results: List[Dict], pred_probs: np.ndarray, class_names: List[str]) -> Dict:
-        """ตรวจสอบความสอดคล้องระหว่าง top predictions"""
         if len(results) < 2:
             return {"is_consistent": True, "warnings": []}
         
@@ -186,78 +166,58 @@ class ResultValidator:
         
         if category_conflict:
             confidence_gap = abs(primary_conf - secondary_conf)
-            
             if confidence_gap < 0.15:
                 warnings.append({
                     "type": "category_conflict",
                     "level": "high",
                     "message": f"โมเดลสับสนระหว่าง{cls._get_category_name(primary_category)}กับ{cls._get_category_name(secondary_category)}",
                     "suggestion": "ควรถ่ายรูปเพิ่มหรือตรวจสอบด้วยตาเปล่า",
-                    "confidence_gap": round(float(confidence_gap), 3),
-                })
-            elif confidence_gap < 0.30:
-                warnings.append({
-                    "type": "category_conflict",
-                    "level": "medium",
-                    "message": f"โมเดลอาจสับสนระหว่าง{cls._get_category_name(primary_category)}กับ{cls._get_category_name(secondary_category)}",
-                    "suggestion": "พิจารณาดูอาการเพิ่มเติม",
-                    "confidence_gap": round(float(confidence_gap), 3),
                 })
         
-        primary_class = primary.get("class_name", "")
-        if primary_class in cls.DISEASE_LOOKING_LIKE_PEST and primary_category == "disease":
-            has_pest_in_top3 = any(r.get("category") == "pest" for r in results)
-            if has_pest_in_top3:
-                warnings.append({
-                    "type": "look_alike",
-                    "level": "medium",
-                    "message": "อาการนี้อาจดูคล้ายแมลงกัด โปรดตรวจสอบว่ามีตัวแมลงหรือรอยกัดจริงหรือไม่",
-                    "suggestion": "ถ้าพบตัวแมลงหรือรูกัด อาจเป็นศัตรูพืชมากกว่าโรค",
-                })
-        
-        elif primary_class in cls.PEST_LOOKING_LIKE_DISEASE and primary_category == "pest":
-            has_disease_in_top3 = any(r.get("category") == "disease" for r in results)
-            if has_disease_in_top3:
-                warnings.append({
-                    "type": "look_alike",
-                    "level": "medium",
-                    "message": "อาการนี้อาจดูคล้ายโรคใบ โปรดตรวจสอบว่ามีตัวแมลงหรือไม่",
-                    "suggestion": "ถ้าไม่พบตัวแมลง อาจเป็นโรคใบมากกว่าศัตรูพืช",
-                })
-        
-        disease_confidence = sum(
-            float(pred_probs[i]) for i, name in enumerate(class_names)
-            if CLASS_MAPPING.get(name, {}).get("category") == "disease"
-        )
-        pest_confidence = sum(
-            float(pred_probs[i]) for i, name in enumerate(class_names)
-            if CLASS_MAPPING.get(name, {}).get("category") == "pest"
-        )
-        
-        category_analysis = {
-            "disease_total_confidence": round(float(disease_confidence), 4),
-            "pest_total_confidence": round(float(pest_confidence), 4),
-            "predicted_category": primary_category,
-            "category_confidence_ratio": round(float(max(disease_confidence, pest_confidence) / (disease_confidence + pest_confidence + 1e-7)), 4),
-        }
+        # Calculate category confidence
+        disease_confidence = sum(float(pred_probs[i]) for i, name in enumerate(class_names) 
+                                if CLASS_MAPPING.get(name, {}).get("category") == "disease")
+        pest_confidence = sum(float(pred_probs[i]) for i, name in enumerate(class_names) 
+                             if CLASS_MAPPING.get(name, {}).get("category") == "pest")
         
         return {
             "is_consistent": len(warnings) == 0,
             "warnings": warnings,
-            "category_analysis": category_analysis,
+            "category_analysis": {
+                "disease_total_confidence": round(float(disease_confidence), 4),
+                "pest_total_confidence": round(float(pest_confidence), 4),
+                "category_confidence_ratio": round(float(max(disease_confidence, pest_confidence) / (disease_confidence + pest_confidence + 1e-7)), 4),
+            },
             "has_category_conflict": category_conflict,
         }
     
     @staticmethod
     def _get_category_name(category: str) -> str:
-        """แปลง category code เป็นภาษาไทย"""
         return "โรคพืช" if category == "disease" else "ศัตรูพืช" if category == "pest" else category
 
+class ImagePreprocessor:
+    """ตัวปรับแต่งรูปภาพสำหรับโมเดล"""
+    
+    @staticmethod
+    def preprocess_for_model(image_path: str, enhance: bool = True) -> Image.Image:
+        img = Image.open(image_path).convert('RGB')
+        if not enhance:
+            return img
+        
+        # ปรับ White Balance พื้นฐาน
+        img_array = np.array(img).astype(np.float32)
+        avg = np.mean(img_array, axis=(0, 1))
+        img_array = np.clip(img_array * (np.mean(avg) / (avg + 1e-6)), 0, 255)
+        img = Image.fromarray(img_array.astype(np.uint8))
+        
+        # ปรับ Contrast & Sharpness
+        img = ImageOps.autocontrast(img, cutoff=1)
+        img = ImageEnhance.Contrast(img).enhance(1.1)
+        img = ImageEnhance.Sharpness(img).enhance(1.2)
+        
+        return img
 
 class TensorFlowModelService:
-    """
-    Singleton Service สำหรับจัดการโมเดล TensorFlow
-    """
     _instance = None
     _model = None
     _class_names = None
@@ -273,169 +233,130 @@ class TensorFlowModelService:
             self.load_model()
 
     def load_model(self) -> bool:
-        """โหลดโมเดล TensorFlow จากไฟล์ .h5"""
         try:
             import tensorflow as tf
-            from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
-            
             if not MODEL_PATH.exists():
                 logger.error(f"Model file not found: {MODEL_PATH}")
                 return False
 
-            logger.info(f"Loading TensorFlow model from: {MODEL_PATH}")
-            
-            # โหลดโมเดล
             self._model = tf.keras.models.load_model(str(MODEL_PATH))
             
-            # ใช้ class names จาก JSON
-            self._class_names = CLASS_NAMES if CLASS_NAMES else list(CLASS_MAPPING.keys())
+            if CLASS_NAMES_PATH.exists():
+                with open(CLASS_NAMES_PATH, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    self._class_names = [data[str(i)] for i in range(len(data))]
+            else:
+                self._class_names = list(CLASS_MAPPING.keys())
             
             self._is_loaded = True
-            logger.info(f"TensorFlow model loaded successfully!")
-            logger.info(f"   - Input shape: {self._model.input_shape}")
-            logger.info(f"   - Output classes: {len(self._class_names)}")
-            logger.info(f"   - Classes: {', '.join(self._class_names)}")
-            
             return True
-            
-        except ImportError:
-            logger.error("TensorFlow not installed. Run: pip install tensorflow")
-            return False
         except Exception as e:
             logger.error(f"Error loading model: {e}")
             return False
 
     def is_ready(self) -> bool:
-        """ตรวจสอบว่าโมเดลพร้อมใช้งานหรือไม่"""
         return self._is_loaded and self._model is not None
 
-    def preprocess_image(self, image_path: str) -> Optional[np.ndarray]:
-        """
-        ประมวลผลรูปภาพก่อนนำเข้าโมเดล
-        ใช้ preprocess_input ของ MobileNetV2
-        """
+    def preprocess_image(self, image_path: str, enhance: bool = True) -> Optional[np.ndarray]:
         try:
             from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
-            
-            # โหลดรูปภาพ
-            img = Image.open(image_path).convert('RGB')
-            
-            # Resize ให้ตรงกับขนาดที่โมเดลต้องการ
-            img_resized = img.resize((IMG_SIZE, IMG_SIZE), Image.Resampling.BILINEAR)
-            
-            # แปลงเป็น numpy array
+            img = ImagePreprocessor.preprocess_for_model(image_path, enhance=enhance)
+            img_resized = img.resize((IMG_SIZE, IMG_SIZE), Image.Resampling.LANCZOS)
             img_array = np.array(img_resized, dtype=np.float32)
             
-            # ใช้ preprocess_input ของ MobileNetV2 (สำคัญ!)
+            # ใช้ preprocess_input ของ MobileNetV2 ตามที่ระบุว่าสำคัญ
             img_array = preprocess_input(img_array)
-            
-            # เพิ่ม batch dimension (1, 160, 160, 3)
-            img_array = np.expand_dims(img_array, axis=0)
-            
-            return img_array
-            
+            return np.expand_dims(img_array, axis=0)
         except Exception as e:
-            logger.error(f"Error preprocessing image: {e}")
+            logger.error(f"Error preprocessing: {e}")
             return None
-    
+
+    def predict_with_tta(self, image_path: str, enhance: bool = True) -> Optional[np.ndarray]:
+        try:
+            img = ImagePreprocessor.preprocess_for_model(image_path, enhance=enhance)
+            img_resized = img.resize((IMG_SIZE, IMG_SIZE), Image.Resampling.LANCZOS)
+            
+            all_preds = []
+            # Orignal, H-Flip, V-Flip
+            variants = [
+                img_resized,
+                img_resized.transpose(Image.FLIP_LEFT_RIGHT),
+                img_resized.transpose(Image.FLIP_TOP_BOTTOM)
+            ]
+            
+            from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
+            for v in variants:
+                arr = preprocess_input(np.array(v, dtype=np.float32))
+                pred = self._model.predict(np.expand_dims(arr, axis=0), verbose=0)
+                all_preds.append(pred[0])
+            
+            return np.mean(all_preds, axis=0)
+        except Exception as e:
+            logger.error(f"TTA Error: {e}")
+            return None
+
     def predict(
         self, 
         image_path: str, 
+        use_tta: bool = True,
+        enhance: bool = True,
         confidence_threshold: float = 0.5
     ) -> Optional[Dict]:
-        """
-        ทำนายรูปภาพด้วยโมเดล TensorFlow
-        """
-        if not self.is_ready():
-            logger.error("Model not loaded")
-            return None
+        if not self.is_ready(): return None
 
         try:
-            logger.info(f"Predicting image: {image_path}")
-            
-            # Preprocess
-            img_array = self.preprocess_image(image_path)
-            if img_array is None:
-                return None
-            
-            # Predict
-            predictions = self._model.predict(img_array, verbose=0)
-            pred_probs = predictions[0]
-            
-            # หา top 3 predictions
-            top_3_indices = np.argsort(pred_probs)[-3:][::-1]
-            
-            # สร้างผลลัพธ์
+            if use_tta:
+                pred_probs = self.predict_with_tta(image_path, enhance=enhance)
+            else:
+                img_arr = self.preprocess_image(image_path, enhance=enhance)
+                if img_arr is None: return None
+                pred_probs = self._model.predict(img_arr, verbose=0)[0]
+
+            top_3_idx = np.argsort(pred_probs)[-3:][::-1]
             results = []
-            for idx in top_3_indices:
-                class_name = self._class_names[idx]
-                class_info = CLASS_MAPPING.get(class_name, {})
-                
+            for idx in top_3_idx:
+                name = self._class_names[idx]
+                info = CLASS_MAPPING.get(name, {})
                 results.append({
-                    "class_name": class_name,
-                    "name_th": class_info.get("name_th", class_name),
-                    "name_en": class_info.get("name_en", class_name),
+                    "class_name": name,
+                    "name_th": info.get("name_th", name),
+                    "name_en": info.get("name_en", name),
                     "confidence": float(pred_probs[idx]),
                     "confidence_percent": round(float(pred_probs[idx]) * 100, 2),
-                    "category": class_info.get("category", "unknown"),
-                    "type": class_info.get("type", "0"),
+                    "category": info.get("category", "unknown"),
                 })
-            
-            # ตรวจสอบความสอดคล้อง
-            validation = ResultValidator.validate_prediction_consistency(
-                results, pred_probs, self._class_names
-            )
-            
-            # ตรวจสอบว่าเป็น Healthy หรือไม่ (ใช้ threshold)
-            is_healthy = results[0]["confidence"] < confidence_threshold
-            
+
+            primary = results[0]
+            is_detected = primary["confidence"] > confidence_threshold
+            uncertainty = float(pred_probs[top_3_idx[0]] - pred_probs[top_3_idx[1]])
+            validation = ResultValidator.validate_prediction_consistency(results, pred_probs, self._class_names)
+
             return {
                 "success": True,
-                "predictions": results,
-                "primary_prediction": results[0],
-                "is_healthy": is_healthy,
+                "is_detected": bool(is_detected),
+                "is_uncertain": bool(uncertainty < 0.2),
+                "primary": {
+                    **primary,
+                    "adjusted_confidence_percent": primary["confidence_percent"]
+                },
+                "top_3": results,
+                "preprocessing": {"enhanced": enhance, "tta": use_tta},
                 "validation": validation,
-                "model_version": "model_round3",
+                "uncertainty_score": round(uncertainty, 4)
             }
-            
         except Exception as e:
-            logger.error(f"Error during prediction: {e}")
-            return None
-    
+            logger.error(f"Predict error: {e}")
+            return {"success": False, "error": str(e)}
+
     def get_model_info(self) -> Dict:
-        """ข้อมูลเกี่ยวกับโมเดล"""
-        return {
-            "loaded": self.is_ready(),
-            "model_path": str(MODEL_PATH),
-            "num_classes": len(self._class_names) if self._class_names else 0,
-            "input_size": IMG_SIZE,
-            "classes": self._class_names,
-            "version": "model_round3",
-        }
+        return {"loaded": self.is_ready(), "model": "model_round3.h5"}
 
+_service = None
+def get_tf_model_service():
+    global _service
+    if _service is None: _service = TensorFlowModelService()
+    return _service
 
-# Global instance
-_tf_service = None
-
-def get_tf_model_service() -> TensorFlowModelService:
-    """Get or create TensorFlow model service instance"""
-    global _tf_service
-    if _tf_service is None:
-        _tf_service = TensorFlowModelService()
-    return _tf_service
-
-
-# ฟังก์ชันสำหรับเรียกใช้งานง่าย
-def analyze_with_tensorflow(image_path: str, confidence_threshold: float = 0.5) -> Optional[Dict]:
-    """
-    วิเคราะห์รูปภาพด้วย TensorFlow Model
-    
-    Args:
-        image_path: Path ของรูปภาพ
-        confidence_threshold: เกณฑ์ความมั่นใจขั้นต่ำ (ค่าต่ำกว่านี้ = Healthy)
-        
-    Returns:
-        Dictionary ผลลัพธ์การทำนาย
-    """
+def analyze_with_tensorflow(image_path, use_tta=True, enhance=True, confidence_threshold=0.5):
     service = get_tf_model_service()
-    return service.predict(image_path, confidence_threshold=confidence_threshold)
+    return service.predict(image_path, use_tta=use_tta, enhance=enhance, confidence_threshold=confidence_threshold)

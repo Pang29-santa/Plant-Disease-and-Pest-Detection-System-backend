@@ -53,7 +53,6 @@ async def ai_health_check():
     
     results = {
         "kimi": {"available": False, "error": None},
-        "openai": {"available": False, "error": None},
         "tensorflow": {"available": False, "error": None, "model_info": None}
     }
     
@@ -73,26 +72,6 @@ async def ai_health_check():
                 results["kimi"]["error"] = f"HTTP {response.status_code}"
     except Exception as e:
         results["kimi"]["error"] = str(e)[:100]
-    
-    # Test OpenAI
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if openai_key:
-        try:
-            from services.openai_ai import get_openai_service
-            openai = get_openai_service()
-            response = requests.post(
-                f"{openai.api_url}/chat/completions",
-                headers={"Authorization": f"Bearer {openai.api_key}", "Content-Type": "application/json"},
-                json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 5},
-                timeout=10
-            )
-            results["openai"]["available"] = response.status_code == 200
-            if not results["openai"]["available"]:
-                results["openai"]["error"] = f"HTTP {response.status_code}"
-        except Exception as e:
-            results["openai"]["error"] = str(e)[:100]
-    else:
-        results["openai"]["error"] = "API key not configured"
     
     # Test TensorFlow Model
     try:
