@@ -55,7 +55,7 @@ CLASS_MAPPING = {
         "type": "2",
     },
     "Cercospora Leaf Spot": {
-        "name_th": "โรคแผลวงกลมสีน้ำตาลไหม้",
+        "name_th": "โรคใบจุดสีน้ำตาล",
         "name_en": "Cercospora Leaf Spot",
         "category": "disease",
         "type": "1",
@@ -300,7 +300,7 @@ class TensorFlowModelService:
         image_path: str, 
         use_tta: bool = False,      # Optimized: TTA makes results worse
         enhance: bool = False,      # Optimized: Enhancement makes results worse
-        confidence_threshold: float = 0.4  # Optimized: Best accuracy (80%)
+        confidence_threshold: float = 0.35  # ลดเหลือ 35% เพื่อให้ตอบโรค/แมลงที่ detect ได้เสมอ
     ) -> Optional[Dict]:
         if not self.is_ready(): return None
 
@@ -327,13 +327,16 @@ class TensorFlowModelService:
                 })
 
             primary = results[0]
-            is_detected = primary["confidence"] >= confidence_threshold
+            
+            # คำนวณความแตกต่างระหว่าง top 1 และ top 2
             uncertainty = float(pred_probs[top_3_idx[0]] - pred_probs[top_3_idx[1]])
+            
             validation = ResultValidator.validate_prediction_consistency(results, pred_probs, self._class_names)
 
             # ถ้าความมั่นใจต่ำกว่า threshold ถือว่าเป็นพืชสุขภาพดี (Healthy)
-            if not is_detected:
+            if primary["confidence"] < confidence_threshold:
                 healthy_confidence = 1.0 - primary["confidence"]
+                
                 return {
                     "success": True,
                     "is_detected": False,
@@ -348,18 +351,20 @@ class TensorFlowModelService:
                         "category": "healthy",
                         "adjusted_confidence_percent": round(healthy_confidence * 100, 2)
                     },
-                    "top_3": results,  # ยังคงส่ง top 3 จริงกลับไปเพื่อ debug
+                    "top_3": results,
                     "preprocessing": {"enhanced": enhance, "tta": use_tta},
                     "validation": validation,
                     "uncertainty_score": round(uncertainty, 4),
-                    "message": "ความมั่นใจต่ำกว่าเกณฑ์ ระบบจึงระบุว่าเป็นพืชสุขภาพดี"
+                    "message": "ไม่พบโรคหรือศัตรูพืชในภาพ",
+                    "detected_class_id": None
                 }
 
+            # ตรวจพบโรค/ศัตรูพืช - ตอบตามผลลัพธ์โดยไม่มี uncertain
             return {
                 "success": True,
                 "is_detected": True,
                 "is_healthy": False,
-                "is_uncertain": bool(uncertainty < 0.2),
+                "is_uncertain": False,  # ไม่มี uncertain อีกต่อไป
                 "primary": {
                     **primary,
                     "adjusted_confidence_percent": primary["confidence_percent"]
@@ -367,7 +372,8 @@ class TensorFlowModelService:
                 "top_3": results,
                 "preprocessing": {"enhanced": enhance, "tta": use_tta},
                 "validation": validation,
-                "uncertainty_score": round(uncertainty, 4)
+                "uncertainty_score": round(uncertainty, 4),
+                "message": f"ตรวจพบ{primary.get('name_th', 'ไม่ระบุ')}"
             }
         except Exception as e:
             logger.error(f"Predict error: {e}")

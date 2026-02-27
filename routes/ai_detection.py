@@ -170,15 +170,28 @@ async def detect_all(
                     print(f"Enriching results with info from DB for ID: {class_id}")
                     analysis["target_name_th"] = db_info.get("thai_name", analysis.get("target_name_th"))
                     analysis["target_name_en"] = db_info.get("eng_name", analysis.get("target_name_en"))
+                    analysis["symptoms"] = db_info.get("cause") or db_info.get("symptoms") or "ไม่มีข้อมูลอาการ"
                     analysis["cause"] = db_info.get("cause")
                     
                     if db_info.get("treatment"):
                         analysis["treatment"] = [db_info["treatment"]]
+                    else:
+                        analysis["treatment"] = ["ไม่มีข้อมูลการรักษาในระบบ"]
                     if db_info.get("prevention"):
                         analysis["prevention"] = [db_info["prevention"]]
+                    else:
+                        analysis["prevention"] = ["ไม่มีข้อมูลการป้องกันในระบบ"]
+                else:
+                    print(f"⚠️ Disease with ID={class_id} not found in database for detect_all")
+                    analysis["symptoms"] = analysis.get("symptoms") or analysis.get("cause") or "ไม่พบข้อมูลในระบบ"
+                    analysis["treatment"] = analysis.get("treatment") or ["ไม่มีข้อมูลการรักษา"]
+                    analysis["prevention"] = analysis.get("prevention") or ["ไม่มีข้อมูลการป้องกัน"]
             except Exception as db_err:
                 print(f"Database enrichment error: {db_err}")
                 # ไม่หยุดการทำงานหากดึงข้อมูลเสริมไม่ได้
+                analysis["symptoms"] = analysis.get("symptoms") or analysis.get("cause") or "ไม่พบข้อมูลในระบบ"
+                analysis["treatment"] = analysis.get("treatment") or ["ไม่มีข้อมูลการรักษา"]
+                analysis["prevention"] = analysis.get("prevention") or ["ไม่มีข้อมูลการป้องกัน"]
 
         response_data = {
             "success": True,
@@ -462,12 +475,13 @@ async def detect_with_tensorflow(
     plot_id: Optional[int] = Form(None),
     use_tta: bool = Form(True),
     enhance: bool = Form(True),
-    confidence_threshold: float = Form(0.5),
+    confidence_threshold: float = Form(0.35),  # ลดเหลือ 35% เพื่อให้ตอบโรค/แมลงเสมอ
+    use_ai_fallback: bool = Form(True),  # เรียก Kimi AI เมื่อ TensorFlow ไม่แน่ใจ
     current_user: Optional[dict] = Depends(get_current_user_optional),
 ):
     """
     วิเคราะห์รูปภาพโรคพืชและศัตรูพืชด้วย TensorFlow Model (MobileNetV2)
-    รองรับ Image Enhancement และ Test Time Augmentation (TTA) เพื่อเพิ่มความแม่นยำ
+    ถ้า TensorFlow ไม่แน่ใจ (confidence < threshold) จะเรียก Kimi AI ช่วยวิเคราะห์เพิ่ม
     
     Args:
         file: รูปภาพที่อัปโหลด
@@ -477,9 +491,10 @@ async def detect_with_tensorflow(
         use_tta: ใช้ Test Time Augmentation (เพิ่มความแม่นยำ)
         enhance: ปรับปรุงคุณภาพรูปภาพ (white balance, contrast, denoise)
         confidence_threshold: เกณฑ์ความมั่นใจขั้นต่ำ (0.0 - 1.0)
+        use_ai_fallback: เรียก Kimi AI เมื่อ TensorFlow ไม่แน่ใจ (default: True)
         
     Returns:
-        ผลการวิเคราะห์จากโมเดล TensorFlow
+        ผลการวิเคราะห์จาก TensorFlow (+ Kimi AI ถ้าไม่แน่ใจ)
     """
     # ตรวจสอบไฟล์
     if not file.content_type.startswith('image/'):
@@ -554,6 +569,107 @@ async def detect_with_tensorflow(
         adjusted_confidence = primary.get("adjusted_confidence_percent", primary.get("confidence_percent", 0))
         original_confidence = primary.get("confidence_percent", 0)
         
+        # ========== FALLBACK TO KIMI AI เมื่อ TensorFlow ไม่แน่ใจ ==========
+        kimi_used = False
+        kimi_result = None
+        
+        # ปรับ threshold ตามประเภท: โรคใช้ 70%, แมลงใช้ 35% (แมลงยากกว่า แต่ถ้าเจอแล้วเชื่อเลย)
+        detected_category = primary.get("category", "")
+        fallback_threshold = 35 if detected_category == "pest" else 70
+        
+        # ตรวจสอบว่า top 2 predictions มีความใกล้เคียงกันหรือไม่ (สำหรับแมลง)
+        # ถ้าใกล้เคียงกันมาก ให้ใช้ Kimi ช่วยตัดสินใจ
+        top_1_conf = primary.get("confidence_percent", 0)
+        top_2_conf = top_3[1].get("confidence_percent", 0) if len(top_3) > 1 else 0
+        confidence_gap = top_1_conf - top_2_conf
+        
+        # ถ้าเจอแมลงแต่ top 2 ใกล้เคียงกัน (< 25% gap) ให้ fallback ไป Kimi ช่วยตัดสิน
+        is_pest_uncertain = detected_category == "pest" and is_detected and confidence_gap < 25
+        
+        # ถ้า TensorFlow ตรวจพบแมลง (pest) อยู่แล้ว และมั่นใจมาก ให้เชื่อ TensorFlow
+        is_pest_confident = detected_category == "pest" and is_detected and confidence_gap >= 25
+        
+        should_use_fallback = (
+            use_ai_fallback and 
+            (not is_detected or primary.get("category") in ["healthy", "uncertain"] or adjusted_confidence < fallback_threshold or is_pest_uncertain)
+            and not is_pest_confident  # ถ้าเจอแมลงและมั่นใจมาก ไม่ต้อง fallback
+        )
+        
+        if should_use_fallback:
+            print(f"🤖 TensorFlow uncertain (detected={is_detected}, confidence={adjusted_confidence}%), calling Kimi AI...")
+            try:
+                kimi_result = await asyncio.to_thread(
+                    analyze_plant_health,
+                    str(temp_path)
+                )
+                
+                print(f"🔍 Kimi raw result: {kimi_result}")
+                
+                # ตรวจสอบว่า kimi_result มีค่าและเป็น dict
+                if kimi_result is None:
+                    print("⚠️ Kimi returned None")
+                elif not isinstance(kimi_result, dict):
+                    print(f"⚠️ Kimi returned non-dict: {type(kimi_result)}")
+                elif not kimi_result.get("success"):
+                    print(f"⚠️ Kimi returned error: {kimi_result.get('error')}")
+                else:
+                    kimi_analysis = kimi_result.get("analysis")
+                    print(f"🔍 Kimi analysis: {kimi_analysis}")
+                    
+                    # ตรวจสอบว่า analysis มีค่าและเป็น dict
+                    if kimi_analysis is None:
+                        print("⚠️ Kimi analysis is None")
+                    elif not isinstance(kimi_analysis, dict):
+                        print(f"⚠️ Kimi analysis is not dict: {type(kimi_analysis)}")
+                    else:
+                        kimi_detected = kimi_analysis.get("is_detected", False)
+                        kimi_category = kimi_analysis.get("category", "unknown")
+                        
+                        print(f"🤖 Kimi AI result: detected={kimi_detected}, category={kimi_category}")
+                        
+                        # ใช้ผล Kimi เสมอเมื่อ TensorFlow ไม่แน่ใจ
+                        print(f"✅ Using Kimi AI result instead of TensorFlow")
+                        kimi_used = True
+                        
+                        # ดึง class_id จากชื่อที่ Kimi ตอบ (ถ้ามี)
+                        kimi_class_name = kimi_analysis.get("target_name_en", "")
+                        try:
+                            if kimi_class_name and kimi_class_name != "Healthy":
+                                db_info = await diseases_collection.find_one({
+                                    "$or": [
+                                        {"eng_name": {"$regex": kimi_class_name, "$options": "i"}},
+                                        {"thai_name": kimi_analysis.get("target_name_th", "")}
+                                    ]
+                                })
+                                if db_info:
+                                    class_id = db_info.get("ID")
+                        except Exception as db_e:
+                            print(f"⚠️ DB lookup error: {db_e}")
+                        
+                        # สร้าง primary ใหม่จากผล Kimi
+                        primary = {
+                            "class_name": kimi_class_name if kimi_class_name else "Healthy",
+                            "name_th": kimi_analysis.get("target_name_th", "พืชสุขภาพดี"),
+                            "name_en": kimi_class_name if kimi_class_name else "Healthy",
+                            "confidence_percent": 85.0 if kimi_detected else 75.0,
+                            "confidence": 0.85 if kimi_detected else 0.75,
+                            "category": kimi_category if kimi_category != "unknown" else "healthy"
+                        }
+                        is_detected = kimi_detected
+                        is_uncertain = False
+                        adjusted_confidence = 85.0 if kimi_detected else 75.0
+                        
+                        # รีเซ็ต class_id เมื่อ Kimi บอกว่าไม่มีโรค
+                        if not kimi_detected:
+                            class_id = None
+                            db_info = None
+                        
+            except Exception as kimi_err:
+                print(f"⚠️ Kimi AI fallback failed: {kimi_err}")
+                import traceback
+                traceback.print_exc()
+                # ถ้า Kimi ล้มเหลว ใช้ผล TensorFlow เดิมต่อไป
+        
         # กำหนดระดับความรุนแรงตาม confidence และ uncertainty
         confidence = adjusted_confidence  # ใช้ adjusted confidence
         if is_uncertain or confidence < 60:
@@ -606,7 +722,7 @@ async def detect_with_tensorflow(
             "uncertainty_score": uncertainty_score,
             "severity_level": severity_level,
             "symptoms": "กำลังโหลดข้อมูล...",  # ⭐ Default รอ DB enrichment
-            "detected_class_id": class_id,
+            "detected_class_id": class_id if is_detected else None,  # ไม่ส่ง class_id ถ้าไม่แน่ใจ
             "top_3_predictions": [
                 {
                     "name_th": p.get("name_th"),
@@ -616,7 +732,9 @@ async def detect_with_tensorflow(
                 }
                 for p in top_3
             ],
-            "model_used": "TensorFlow_MobileNetV2",
+            "model_used": "Kimi_AI" if kimi_used else "TensorFlow_MobileNetV2",
+            "fallback_used": kimi_used,
+            "kimi_analysis": kimi_result.get("analysis") if kimi_used else None,
             "preprocessing": preprocessing_info,
             "confidence_threshold_used": confidence_threshold,
             "validation": {
@@ -632,10 +750,13 @@ async def detect_with_tensorflow(
             "show_alternatives": show_alternatives,  # บ่งบอกว่าควรแสดงตัวเลือกอื่นหรือไม่
         }
         
-        # เติมข้อมูลจาก Database ถ้าพบ class_id
+        # เติมข้อมูลจาก Database ถ้าพบ class_id (ดึงข้อมูลทุกครั้งที่มี class_id ไม่ว่าจะใช้ Kimi หรือไม่)
         if class_id:
+            db_lookup_success = False
             try:
+                # ถ้ามี db_info จากการค้นหาก่อนหน้า ใช้เลย
                 if db_info:
+                    print(f"✅ Enriching from existing db_info for ID: {class_id}")
                     analysis["target_name_th"] = db_info.get("thai_name", analysis["target_name_th"])
                     analysis["target_name_en"] = db_info.get("eng_name", analysis["target_name_en"])
                     analysis["symptoms"] = db_info.get("cause") or db_info.get("symptoms") or "ไม่มีข้อมูลอาการ"
@@ -648,13 +769,73 @@ async def detect_with_tensorflow(
                         analysis["prevention"] = [db_info["prevention"]]
                     else:
                         analysis["prevention"] = ["ไม่มีข้อมูลการป้องกันในระบบ"]
+                    db_lookup_success = True
+                else:
+                    # ไม่มี db_info - ค้นหาโดยตรงด้วย ID
+                    print(f"🔍 Looking up disease info in DB for ID: {class_id}")
+                    diseases_collection = get_collection("diseases_pest")
+                    db_info_retry = await diseases_collection.find_one({"ID": class_id})
+                    if db_info_retry:
+                        print(f"✅ Found disease by ID lookup: {db_info_retry.get('thai_name')}")
+                        analysis["target_name_th"] = db_info_retry.get("thai_name", analysis["target_name_th"])
+                        analysis["target_name_en"] = db_info_retry.get("eng_name", analysis["target_name_en"])
+                        analysis["symptoms"] = db_info_retry.get("cause") or "ไม่มีข้อมูลอาการ"
+                        analysis["cause"] = db_info_retry.get("cause")
+                        if db_info_retry.get("treatment"):
+                            analysis["treatment"] = [db_info_retry["treatment"]]
+                        else:
+                            analysis["treatment"] = ["ไม่มีข้อมูลการรักษาในระบบ"]
+                        if db_info_retry.get("prevention"):
+                            analysis["prevention"] = [db_info_retry["prevention"]]
+                        else:
+                            analysis["prevention"] = ["ไม่มีข้อมูลการป้องกันในระบบ"]
+                        db_lookup_success = True
+                    else:
+                        print(f"⚠️ Disease with ID={class_id} not found in database")
             except Exception as db_err:
                 print(f"Database enrichment error: {db_err}")
+            
+            # ถ้าดึงจาก DB ไม่สำเร็จ และใช้ Kimi อยู่ ให้ลองใช้ข้อมูลจาก Kimi
+            if not db_lookup_success and kimi_used and kimi_result and kimi_result.get("analysis"):
+                kimi_analysis = kimi_result["analysis"]
+                analysis["symptoms"] = kimi_analysis.get("symptoms", kimi_analysis.get("cause", "ไม่พบข้อมูลอาการ"))
+                analysis["cause"] = kimi_analysis.get("cause")
+                if kimi_analysis.get("treatment"):
+                    treatment_data = kimi_analysis["treatment"]
+                    analysis["treatment"] = treatment_data if isinstance(treatment_data, list) else [treatment_data]
+                else:
+                    analysis["treatment"] = ["ไม่มีข้อมูลการรักษา"]
+                if kimi_analysis.get("prevention"):
+                    prevention_data = kimi_analysis["prevention"]
+                    analysis["prevention"] = prevention_data if isinstance(prevention_data, list) else [prevention_data]
+                else:
+                    analysis["prevention"] = ["ไม่มีข้อมูลการป้องกัน"]
         else:
-            # ไม่พบข้อมูลใน DB
-            analysis["symptoms"] = "ไม่พบข้อมูลในระบบ"
-            analysis["treatment"] = ["ไม่มีข้อมูลการรักษา"]
-            analysis["prevention"] = ["ไม่มีข้อมูลการป้องกัน"]
+            # ไม่มี class_id
+            if kimi_used and not is_detected:
+                # กรณี Kimi บอกว่าไม่มีโรค
+                analysis["symptoms"] = "ไม่พบอาการผิดปกติ"
+                analysis["treatment"] = ["ไม่จำเป็นต้องรักษา"]
+                analysis["prevention"] = ["ดูแลรักษาตามปกติ"]
+            elif kimi_result and kimi_result.get("analysis"):
+                # ใช้ข้อมูลจาก Kimi AI
+                kimi_analysis = kimi_result["analysis"]
+                analysis["symptoms"] = kimi_analysis.get("symptoms", kimi_analysis.get("cause", "ไม่พบข้อมูลอาการ"))
+                analysis["cause"] = kimi_analysis.get("cause")
+                if kimi_analysis.get("treatment"):
+                    treatment_data = kimi_analysis["treatment"]
+                    analysis["treatment"] = treatment_data if isinstance(treatment_data, list) else [treatment_data]
+                else:
+                    analysis["treatment"] = ["ไม่มีข้อมูลการรักษา"]
+                if kimi_analysis.get("prevention"):
+                    prevention_data = kimi_analysis["prevention"]
+                    analysis["prevention"] = prevention_data if isinstance(prevention_data, list) else [prevention_data]
+                else:
+                    analysis["prevention"] = ["ไม่มีข้อมูลการป้องกัน"]
+            else:
+                analysis["symptoms"] = "ไม่พบข้อมูลในระบบ"
+                analysis["treatment"] = ["ไม่มีข้อมูลการรักษา"]
+                analysis["prevention"] = ["ไม่มีข้อมูลการป้องกัน"]
         
         response_data = {
             "success": True,
